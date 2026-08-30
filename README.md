@@ -1,12 +1,14 @@
 # coding-agent
-构建编程智能体
-任务需求：
-我需要设计并实现一个编程智能体（coding agent）：它通过与大语言模型交互，能自主
-地读写文件、执行命令，完成你交给它的编程任务——类似一个简化的 Claude Code、Codex、
-OpenCode、DeepSeek Harness 等。功能繁简不限，可以很简单，也可以做得完善。不允许在现成 agent 产品上封装界面，也不得使用任何 agent 框架 / SDK（LangChain、LlamaIndex、OpenAI Agents SDK、ClaudeAgent SDK、AutoGen、CrewAI 等）。允许使用模型厂商的 API 客户端库、OpenAI 兼容网关及模型原生的 tool calling 接口，但不得依赖 API 服务端托管的代码执行或文件工具（如 CodeInterpreter、Files API）；重要逻辑需自行编写，包括但不限于：对话历史与上下文管理、工具的定义与本地执行、模型输出的解析、循环终止条件、错误处理。API key 等凭据一律通过环境变量获取
 
-工作流程：
-## 阶段 1：需求 & 架构设计（先定清楚智能体能干什么）
+构建编程智能体
+
+## 任务需求
+
+我需要设计并实现一个编程智能体（coding agent）：它通过与大语言模型交互，能自主地读写文件、执行命令，完成你交给它的编程任务——类似一个简化的 Claude Code、Codex、OpenCode、DeepSeek Harness 等。功能繁简不限，可以很简单，也可以做得完善。不允许在现成 agent 产品上封装界面，也不得使用任何 agent 框架 / SDK（LangChain、LlamaIndex、OpenAI Agents SDK、ClaudeAgent SDK、AutoGen、CrewAI 等）。允许使用模型厂商的 API 客户端库、OpenAI 兼容网关及模型原生的 tool calling 接口，但不得依赖 API 服务端托管的代码执行或文件工具（如 CodeInterpreter、Files API）；重要逻辑需自行编写，包括但不限于：对话历史与上下文管理、工具的定义与本地执行、模型输出的解析、循环终止条件、错误处理。API key 等凭据一律通过环境变量获取。
+
+## 工作流程
+
+### 阶段 1：需求 & 架构设计（先定清楚智能体能干什么）
 
 1. 明确目标：你的编程 Agent 具体任务？
    - 选项 A：需求→自动生成新项目（从零写完整项目）
@@ -16,17 +18,15 @@ OpenCode、DeepSeek Harness 等。功能繁简不限，可以很简单，也可�
 2. 设定边界：禁止操作什么文件，最大迭代次数（防止无限循环）
 3. 编写**系统提示词（System Prompt）**：定义 Agent 角色、工作步骤、输出 JSON 格式、出错处理规则
 
-
-## 阶段 2：最小原型开发（先做最简可用版本，不要一步到位全功能）
+### 阶段 2：最小原型开发（先做最简可用版本，不要一步到位全功能）
 
 1. 选择模型 API、安装 LangGraph 等框架，完成基础 LLM 调用
 2. 实现单轮 ReAct 循环：思考→决定调用工具→执行工具→拿到结果再思考
 3. 先只开放 1 个简单工具，比如读取单个文件，跑通一轮闭环
 
-> 
 > 此时就已经是最简单的编程智能体
 
-## 阶段 3：增加完整编程工具链
+### 阶段 3：增加完整编程工具链
 
 依次接入：
 
@@ -36,7 +36,7 @@ OpenCode、DeepSeek Harness 等。功能繁简不限，可以很简单，也可�
 4. RAG 代码知识库：上传你的项目源码，让智能体能看懂旧代码
 5. 记忆模块：短期对话记忆 + 长期项目记忆
 
-## 阶段 4：核心自主工作流（编程 Agent 标准闭环）
+### 阶段 4：核心自主工作流（编程 Agent 标准闭环）
 
 标准自主开发循环：
 
@@ -48,16 +48,20 @@ OpenCode、DeepSeek Harness 等。功能繁简不限，可以很简单，也可�
 6. 判断结果：成功→结束；失败→分析报错，自动修复代码，回到第 4 步，循环迭代
 7. 完成，输出结果给用户审阅
 
-## 阶段 5：迭代优化、评测、部署上线
+### 阶段 5：迭代优化、评测、部署上线
 
 1. 限制最大循环次数，增加终止条件，避免死循环
 2. 评测：用 SWE‑bench、自己的测试用例检验 Agent 能否正确解决编程任务
 3. 增加人工介入点：关键修改先等待你的审批，再写入磁盘
 4. 使用命令行的形式封装，部署运行在本地
 
+---
 
-大体思路：
-总体架构预览
+## 大体思路
+
+### 总体架构预览
+
+```text
 用户输入需求
       │
       ▼
@@ -83,54 +87,50 @@ OpenCode、DeepSeek Harness 等。功能繁简不限，可以很简单，也可�
 │  · grep / RAG 代码检索        │
 │  · 记忆读写                 │
 └─────────────────────────────┘
-阶段 1：需求 & 架构设计
-1.1 明确目标
+```
+
+### 阶段 1：需求 & 架构设计
+
+#### 1.1 明确目标
+
 你列出的四个选项可以组合：
-选项 A：从零生成新项目
-选项 B：读取现有仓库修复 Bug
-选项 C：加功能、批量重构
-选项 D：编写→运行测试→迭代调试直到成功
+
+- 选项 A：从零生成新项目
+- 选项 B：读取现有仓库修复 Bug
+- 选项 C：加功能、批量重构
+- 选项 D：编写→运行测试→迭代调试直到成功
+
 选择「D + A + B」组合：核心能力是「自主开发循环」，既能从空目录开始写项目，也能在已有仓库中修 Bug 或加功能。原因：
-四种任务本质上共用同一套「读文件 → 写文件 → 执行命令 → 看测试结果 → 迭代」闭环。
-后续阶段 3、4 的工具链全部围绕这个闭环设计，不需要按任务类型拆分版本。
-评测时可以用 SWE-bench 的 Bug 修复任务，也可以用自己的「生成新项目」任务，覆盖面广。
+
+- 四种任务本质上共用同一套「读文件 → 写文件 → 执行命令 → 看测试结果 → 迭代」闭环。
+- 后续阶段 3、4 的工具链全部围绕这个闭环设计，不需要按任务类型拆分版本。
+- 评测时可以用 SWE-bench 的 Bug 修复任务，也可以用自己的「生成新项目」任务，覆盖面广。
+
 具体任务定义：
-纯文本
-纯文本
-输入：用户自然语言描述
-输出：代码变更 + 测试结果 + 总结
-核心循环：
-  理解需求 → 探索代码 → 修改/创建文件 → 运行验证 → 失败则修复 → 成功则输出
-1.2 设定边界
+
+- 输入：用户自然语言描述
+- 输出：代码变更 + 测试结果 + 总结
+- 核心循环：理解需求 → 探索代码 → 修改/创建文件 → 运行验证 → 失败则修复 → 成功则输出
+
+#### 1.2 设定边界
+
 这些边界会在代码中用「配置常量」控制，也会写进 System Prompt 约束模型。
-边界项
-建议值
-说明
-工作区根目录
-WORKSPACE 环境变量指定
-所有读写和执行命令必须发生在该目录下
-禁止写入路径
-.git/、node_modules/、__pycache__/
-防止损坏元数据或第三方依赖
-禁止命令
-rm -rf /、sudo、mkfs、dd、shutdown、reboot、curl x \| sh
-黑名单 + 正则匹配
-单命令超时
-30 秒
-防止死循环或卡死
-最大工具调用次数
-30 次
-防止无限循环
-输出截断
-工具输出超过 3000 字符则截断
-防止上下文爆炸
-单文件读取上限
-一次最多 200 行
-防止大文件淹没模型
-1.3 编写 System Prompt
+
+| 边界项 | 建议值 | 说明 |
+| --- | --- | --- |
+| 工作区根目录 | WORKSPACE 环境变量指定 | 所有读写和执行命令必须发生在该目录下 |
+| 禁止写入路径 | `.git/`、`node_modules/`、`__pycache__/` | 防止损坏元数据或第三方依赖 |
+| 禁止命令 | `rm -rf /`、`sudo`、`mkfs`、`dd`、`shutdown`、`reboot`、`curl x \| sh` | 黑名单 + 正则匹配 |
+| 单命令超时 | 30 秒 | 防止死循环或卡死 |
+| 最大工具调用次数 | 30 次 | 防止无限循环 |
+| 输出截断 | 工具输出超过 3000 字符则截断 | 防止上下文爆炸 |
+| 单文件读取上限 | 一次最多 200 行 | 防止大文件淹没模型 |
+
+#### 1.3 编写 System Prompt
+
 这是 Agent 的「大脑说明书」。我给你一个种子版本，后续你可以根据实际表现反复迭代。
-纯文本
-纯文本
+
+```text
 你是一名资深软件工程师，运行在受控沙盒中，工作目录是 /workspace。
 用户会给你一个编程任务。你的目标是完成它并输出结构化结果。
 
@@ -161,14 +161,15 @@ rm -rf /、sudo、mkfs、dd、shutdown、reboot、curl x \| sh
   "test_results": {"passed": 12, "failed": 0, "error": null},
   "unfinished": "未完成事项说明"
 }
+```
 
-提示：System Prompt 的完善不是一次性的。每当你发现 Agent 行为不稳定，优先修改提示词，再考虑改代码。
+> 提示：System Prompt 的完善不是一次性的。每当你发现 Agent 行为不稳定，优先修改提示词，再考虑改代码。
 
-阶段 2：最小原型开发（完整代码）
+### 阶段 2：最小原型开发（完整代码）
 
 先明确我们手头已有的文件结构：
 
-
+```text
 project/
 ├── agent.py               # Agent 主循环 + LLM 调用
 ├── tools.py               # 工具实现（路径安全、执行逻辑）
@@ -176,11 +177,13 @@ project/
 ├── workspace/             # Agent 的工作区（测试用）
 │   └── hello.py
 └── .env                   # API Key 等配置
-2.1 工具实现 tools.py
+```
+
+#### 2.1 工具实现 tools.py
 
 这里最核心的一个点：路径安全。Agent 只能在工作区内读写文件，绝不能越界。
 
-python
+```python
 # tools.py
 import os
 import re
@@ -216,16 +219,16 @@ def read_file(args: dict) -> str:
     path = args["path"]
     offset = int(args.get("offset", 0))
     limit = int(args.get("limit", 200))
-    
+
     abs_path = _resolve_workspace_path(path)
-    
+
     if not os.path.exists(abs_path):
         return f"[read_file 错误] 文件不存在: {path}"
     if os.path.isdir(abs_path):
         return f"[read_file 错误] 路径是目录，不是文件: {path}"
     if not os.path.isfile(abs_path):
         return f"[read_file 错误] 不是常规文件: {path}"
-    
+
     try:
         with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -240,19 +243,21 @@ def read_file(args: dict) -> str:
         return _truncate(result)
     except Exception as e:
         return f"[read_file 错误] 读取失败: {type(e).__name__}: {e}"
+```
 
-这个工具已经具备阶段1要求的「工作区隔离」能力。后续所有文件工具都会共用 _resolve_workspace_path，这是安全基石。
+这个工具已经具备阶段1要求的「工作区隔离」能力。后续所有文件工具都会共用 `_resolve_workspace_path`，这是安全基石。
 
-2.2 Agent 主循环 agent.py
+#### 2.2 Agent 主循环 agent.py
 
 主循环是整个 Agent 的心脏。它的职责：
 
-维护消息历史
-调用模型
-解析返回，判断是否要调工具
-执行工具，把结果追加到历史
-判断终止条件，决定继续还是结束
-python
+- 维护消息历史
+- 调用模型
+- 解析返回，判断是否要调工具
+- 执行工具，把结果追加到历史
+- 判断终止条件，决定继续还是结束
+
+```python
 # agent.py
 import os
 import json
@@ -339,10 +344,10 @@ def execute_tool_call(tool_call):
         fn_args = json.loads(tool_call.function.arguments or "{}")
     except json.JSONDecodeError:
         return f"[执行错误] 工具参数不是合法 JSON: {tool_call.function.arguments}"
-    
+
     if fn_name not in TOOL_FUNCTIONS:
         return f"[执行错误] 未知工具: {fn_name}"
-    
+
     print(f"\n  ┌─ 调用工具: {fn_name}({json.dumps(fn_args, ensure_ascii=False)})")
     try:
         result = TOOL_FUNCTIONS[fn_name](fn_args)
@@ -355,19 +360,19 @@ def execute_tool_call(tool_call):
 
 def agent_loop(user_request: str) -> str:
     """Agent 主循环：返回最终回答文本"""
-    
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_request},
     ]
-    
+
     tool_call_count = 0
     final_answer = ""
-    
+
     for turn in range(MAX_TOTAL_TURNS):
         # 1. 调用模型
         assistant = call_llm(messages)
-        
+
         # 2. 如果拒绝回答（不返回tool_calls），把纯文本回答加入历史并结束
         if not assistant.tool_calls:
             messages.append({
@@ -377,7 +382,7 @@ def agent_loop(user_request: str) -> str:
             final_answer = assistant.content or ""
             print(f"\n[agent] 模型已给出最终回答，循环结束（第 {turn+1} 轮）")
             break
-        
+
         # 3. 模型请求调用工具
         messages.append({
             "role": "assistant",
@@ -394,7 +399,7 @@ def agent_loop(user_request: str) -> str:
                 for tc in assistant.tool_calls
             ],
         })
-        
+
         # 4. 逐个执行工具（并行执行在这里先简化为串行）
         for tool_call in assistant.tool_calls:
             tool_call_count += 1
@@ -411,9 +416,9 @@ def agent_loop(user_request: str) -> str:
                     ensure_ascii=False,
                     indent=2,
                 )
-            
+
             tool_result = execute_tool_call(tool_call)
-            
+
             # 5. 工具结果以 "tool" 角色加入历史
             #    注意：tool_call_id 必须对应 assistant 消息里给出的 id
             messages.append({
@@ -421,10 +426,10 @@ def agent_loop(user_request: str) -> str:
                 "tool_call_id": tool_call.id,
                 "content": tool_result,
             })
-        
+
         # 6. 本轮结束，进入下一轮模型推理
         print(f"  [轮次 {turn+1} 完成，共已调用 {tool_call_count} 次工具]")
-    
+
     return final_answer
 
 
@@ -442,11 +447,13 @@ def main():
 
 if __name__ == "__main__":
     main()
-2.3 试运行
+```
+
+#### 2.3 试运行
 
 准备一个测试工作区：
 
-bash
+```bash
 mkdir -p workspace
 cat > workspace/hello.py << 'EOF'
 def greet(name):
@@ -479,17 +486,20 @@ cat > system_prompt.txt << 'EOF'
   "unfinished": ""
 }
 EOF
+```
 
 然后运行：
 
-bash
+```bash
 export DEEPSEEK_API_KEY="你的key"
 python agent.py "读取 workspace/hello.py 的内容，并告诉我这个文件实现了哪些函数"
+```
 
 预期行为：
 
+```text
 [agent] 收到需求: 读取 workspace/hello.py ...
 [agent] 模型已给出最终回答，循环结束（第 2 轮）
+```
 
-模型应该在第一轮选择调用 read_file，工具返回文件内容，第二轮模型根据文件内容回答用户问题。
-
+模型应该在第一轮选择调用 `read_file`，工具返回文件内容，第二轮模型根据文件内容回答用户问题。
