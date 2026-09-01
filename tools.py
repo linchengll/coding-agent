@@ -83,6 +83,10 @@ _FILE_VERSIONS = {}        # 相对路径 -> 版本号(int)，写一次自增
 MEMORY_FILE = ".agent_memory.json"
 CONVERSATION_FILE = ".agent_conversation.json"
 
+# 任务计划状态（会话级，update_plan 工具读写，agent_loop 注入到 messages）
+_PLAN_STEPS = []           # [{step:int, desc:str, status:str}]  status: pending/doing/done/blocked
+_PLAN_CURRENT = 0          # 当前进行到第几步（1-based，0=未开始）
+
 
 # ════════════ 基础工具函数 ════════════
 
@@ -843,3 +847,207 @@ def conversation_load() -> list:
         return data if isinstance(data, list) else []
     except Exception:
         return []
+
+
+# ════════════ 模块6：任务规划（阶段4方向1）════════════
+
+def update_plan(args: dict) -> str:
+    """更新任务计划。Agent 接到需求后必须先调用此工具拆解子任务清单。
+    每完成一步或换方案时再调用，更新步骤状态。agent_loop 每轮把计划注入上下文。
+    参数：
+      steps: [{step:int(从1起), desc:str, status:"pending"|"doing"|"done"|"blocked"}, ...]
+             （整体替换式更新；不传则只更新 current_step）
+      current_step: int（可选，当前进行到第几步；0=未开始）
+      replace: bool（可选，默认true=整体替换；false=只更新状态）
+    """
+    global _PLAN_STEPS, _PLAN_CURRENT
+    steps_in = args.get("steps")
+    current = args.get("current_step")
+    replace = args.get("replace", True)
+
+    if steps_in is not None:
+        if not isinstance(steps_in, list):
+            return _err("steps 必须是数组")
+        # 校验+规范化
+        new_steps = []
+        for i, s in enumerate(steps_in, 1):
+            if not isinstance(s, dict):
+                return _err(f"steps[{i}] 不是对象")
+            new_steps.append({
+                "step": int(s.get("step", i)),
+                "desc": str(s.get("desc", ""))[:200],
+                "status": s.get("status", "pending") if s.get("status") in
+                          ("pending", "doing", "done", "blocked") else "pending",
+            })
+        if replace:
+            _PLAN_STEPS = new_steps
+        else:
+            # 合并：按 step 编号对齐，只更新 status
+            for ns in new_steps:
+                for ps in _PLAN_STEPS:
+                    if ps["step"] == ns["step"]:
+                        ps["status"] = ns["status"]
+                        break
+    if current is not None:
+        _PLAN_CURRENT = int(current)
+
+    # 返回当前完整计划+进度
+    summary = get_plan_summary()
+    return _ok(summary, reason="计划已更新",
+               context_hint=f"当前第{_PLAN_CURRENT}步" if _PLAN_STEPS else "计划已建立，开始执行第1步")
+
+
+def get_plan_summary() -> str:
+    """生成计划+进度的可读文本（供 agent_loop 注入到 messages）"""
+    if not _PLAN_STEPS:
+        return ""
+    done = sum(1 for s in _PLAN_STEPS if s["status"] == "done")
+    total = len(_PLAN_STEPS)
+    lines = [f"任务计划（{done}/{total} 已完成，当前第 {_PLAN_CURRENT} 步）："]
+    for s in _PLAN_STEPS:
+        mark = {"done": "x", "doing": ">", "blocked": "!", "pending": " "}.get(s["status"], " ")
+        cur = " <-- 当前" if s["step"] == _PLAN_CURRENT else ""
+        lines.append(f"  [{mark}] {s['step']}. {s['desc']}{cur}")
+    return "\n".join(lines)
+
+
+def reset_plan() -> None:
+    """重置计划状态（新任务开始前调用）"""
+    global _PLAN_STEPS, _PLAN_CURRENT
+    _PLAN_STEPS = []
+    _PLAN_CURRENT = 0
+
+
+# ════════════ 模块7：结构化测试工具（阶段4方向2）════════════
+
+def _parse_pytest_output(stdout: str, stderr: str) -> dict:
+    """解析 pytest 输出，提取结构化测试结果。
+    返回：{passed:int, failed:int, errors:int, warnings:int,
+           failed_items:[{name:str, file:str, line:int, error:str}], summary_line:str}
+    """
+    combined = (stdout or "") + "\n" + (stderr or "")
+    result = {
+        "passed": 0, "failed": 0, "errors": 0, "warnings": 0,
+        "failed_items": [], "summary_line": "",
+    }
+    # 1. 汇总行：===== 3 passed, 2 failed, 1 error in 1.23s =====
+    # 注意：旧版用 re.search 单正则匹配，但每个 group 都加了 ?，
+    # 在 stdout 第 0 位匹配到 '======'(test session starts 行) 后零宽成功，
+    # 没继续往后找 'N passed' → 实测真实输出解析为 passed=0。
+    # 改用 splitlines 逐行扫：必须是首尾都是 === 的行且含 passed/failed/errors/warnings/no tests ran 关键字。
+    for line in combined.splitlines():
+        s = line.strip()
+        if not (s.startswith("=") and s.endswith("=") and len(s) >= 6):
+            continue
+        body = s.strip("=").strip()
+        if not re.search(r"\b(passed|failed|errors?|warnings?|no tests ran)\b", body):
+            continue
+        pm = re.search(r"(\d+)\s*passed", body)
+        fm = re.search(r"(\d+)\s*failed", body)
+        em = re.search(r"(\d+)\s*errors?", body)
+        wm = re.search(r"(\d+)\s*warnings?", body)
+        if pm:
+            result["passed"] = int(pm.group(1))
+        if fm:
+            result["failed"] = int(fm.group(1))
+        if em:
+            result["errors"] = int(em.group(1))
+        if wm:
+            result["warnings"] = int(wm.group(1))
+        result["summary_line"] = body
+        break   # 只取第一个汇总行（pytest 只输出一个）
+
+    # 2. 失败项：FAILED tests/test_xxx.py::test_name - 或 _ test_name _
+    # 格式1: FAILED tests/test_foo.py::test_bar - assert 3 == 4
+    for fm in re.finditer(r"FAILED\s+(\S+?)::(\w+)\s*-\s*(.+)", combined):
+        result["failed_items"].append({
+            "name": fm.group(2),
+            "file": fm.group(1),
+            "line": 0,
+            "error": fm.group(3)[:300],
+        })
+    # 格式2: _____ test_name _____（失败函数标题块）
+    if not result["failed_items"]:
+        for fm in re.finditer(r"_{5,}\s+(\w+)\s+_{5,}", combined):
+            result["failed_items"].append({
+                "name": fm.group(1), "file": "", "line": 0, "error": "",
+            })
+
+    # 3. 错误项：ERROR tests/test_xxx.py::test_name
+    for em in re.finditer(r"ERROR\s+(\S+?)::(\w+)", combined):
+        result["failed_items"].append({
+            "name": em.group(2), "file": em.group(1), "line": 0, "error": "收集阶段错误",
+        })
+
+    # 4. 第一个失败的 traceback 片段（最相关）
+    tb_match = re.search(r"(E\s+\w+Error:.+?)(?:={3,}|\n\n)", combined, re.DOTALL)
+    if tb_match:
+        result["first_error"] = tb_match.group(1)[:500]
+    else:
+        result["first_error"] = ""
+
+    return result
+
+
+def run_tests(args: dict) -> str:
+    """结构化测试运行工具：调用 pytest 并解析输出，返回结构化结果而非原始 stderr。
+    比 run_command('pytest ...') 更适合模型快速判断失败用例与根因。
+    参数：
+      target: 测试目标（文件/目录），默认 'tests/'
+      args_str: 额外 pytest 参数，如 '-v --tb=short'，默认 '-v'
+    """
+    target = args.get("target", "tests/")
+    extra_args = args.get("args_str", "-v --tb=short")
+    # 安全：target 越界检查（测试目录须在工作区内）
+    try:
+        _resolve_workspace_path(target)
+    except PermissionError as e:
+        return _err(str(e), context_hint="测试目标必须在工作区内")
+
+    # 构造命令：pytest <target> <extra_args>
+    # 注意：target 路径形式要避免被白名单当编译产物（pytest 在白名单，无此问题）
+    cmd = f"pytest {target} {extra_args}".strip()
+    # 复用 run_command 的安全检查
+    reject = _check_command_safety(cmd)
+    if reject:
+        return _err(reject, context_hint="测试命令须以 pytest 开头")
+    fixed_cmd = _chcp_utf8_prefix() + _windows_fix_exec_path(cmd)
+    try:
+        proc = subprocess.run(
+            fixed_cmd, shell=True, cwd=WORKSPACE, timeout=CMD_TIMEOUT,
+            capture_output=True, env=_build_safe_env_utf8(),
+        )
+        stdout = _decode_bytes(proc.stdout) or ""
+        stderr = _decode_bytes(proc.stderr) or ""
+        parsed = _parse_pytest_output(stdout, stderr)
+        parsed["exit_code"] = proc.returncode
+        parsed["raw_tail"] = stdout[-500:] if stdout else stderr[-500:]
+        success = proc.returncode == 0
+        result_str = json.dumps(parsed, ensure_ascii=False)
+        # 防误判：pytest 未收集到任何测试（passed/failed/errors 全 0 且 failed_items 为空）
+        # 此时可能 exit_code=0（被吞）或 exit_code=4（no tests ran），
+        # 旧逻辑下要么报"全部通过"要么报"测试失败但 failed_items 为空"，都会误导模型。
+        # 统一给显式提示，让模型先排查 collection 问题，不要编造"全部通过"。
+        if (parsed["passed"] == 0 and parsed["failed"] == 0
+                and parsed["errors"] == 0 and not parsed["failed_items"]):
+            hint = ("pytest 未收集到任何测试。请检查：1) target 路径是否正确；"
+                    "2) 测试文件命名是否为 test_*.py；"
+                    "3) 测试函数命名是否为 test_*；"
+                    "4) 测试文件 import 是否失败（conftest.py 是否漏写 sys.path.insert）；"
+                    "5) raw_tail 字段含末尾原始输出，可定位 collection error")
+            return _ok(result_str,
+                       reason=f"未收集到测试（exit_code={proc.returncode}）",
+                       context_hint=hint)
+        if success:
+            return _ok(result_str, reason=f"测试通过：{parsed['passed']} passed",
+                       context_hint="全部通过，可以进入下一步或提交")
+        else:
+            hint = "测试失败，请根据 failed_items 修改源码后重新 run_tests；" \
+                   "同一失败连续3次必须换方案（如换算法/重新设计）"
+            return _ok(result_str, reason=f"测试失败：{parsed['failed']} failed, "
+                                          f"{parsed['errors']} errors", context_hint=hint)
+    except subprocess.TimeoutExpired:
+        return _err(f"测试超时（>{CMD_TIMEOUT}s）",
+                    context_hint="测试卡死或死循环，必须换方案")
+    except Exception as e:
+        return _err(f"执行异常: {type(e).__name__}: {e}")
