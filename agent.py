@@ -13,8 +13,13 @@ from types import SimpleNamespace
 import openai
 from dotenv import load_dotenv
 
+from logger import emitter
+
 # 脚本所在目录，用于定位 .env / system_prompt.txt
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 阶段横幅缓存：上次观察到的计划当前步，仅用于 stage_change 触发比较
+_last_plan_step = None
 
 # 启动时自动读取 .env 文件（API Key 等配置写在那里）
 load_dotenv(os.path.join(BASE_DIR, ".env"))
@@ -267,13 +272,38 @@ def execute_tool_call(tool_call):
     if fn_name not in TOOL_FUNCTIONS:
         return f"[执行错误] 未知工具: {fn_name}"
 
-    print(f"\n  ┌─ 调用工具: {fn_name}({json.dumps(fn_args, ensure_ascii=False)})")
+    args_preview = json.dumps(fn_args, ensure_ascii=False)[:80]
+    # update_plan 的 steps 数组冗长且常被截断（desc 已在阶段横幅显示），精简为步号
+    if fn_name == "update_plan":
+        _steps = fn_args.get("steps") or []
+        _cs = fn_args.get("current_step", 0)
+        args_preview = (f"current_step={_cs}/{len(_steps)}"
+                        if _steps and _cs else
+                        f"steps={len(_steps)}项, current_step={_cs}")
+    emitter.emit("tool_call", {
+        "name": fn_name,
+        "args_preview": args_preview,
+    })
     try:
         result = TOOL_FUNCTIONS[fn_name](fn_args)
-        preview = str(result)[:120]
-        print(f"  └─ 结果: {preview}{'...' if len(str(result)) > 120 else ''}")
+        # 解析统一 JSON 返回取 success/reason；失败则降级用 result 原文
+        try:
+            r = json.loads(result)
+            success = bool(r.get("success"))
+            reason = str(r.get("reason") or "")[:60]
+        except Exception:
+            success = False
+            reason = str(result)[:60]
+        emitter.emit("tool_result", {
+            "success": success,
+            "reason_preview": reason,
+        })
         return str(result)
     except Exception as e:
+        emitter.emit("tool_result", {
+            "success": False,
+            "reason_preview": f"{type(e).__name__}: {e}"[:60],
+        })
         return f"[执行异常] {type(e).__name__}: {e}"
 
 
@@ -429,6 +459,8 @@ def agent_loop(user_request: str) -> str:
     """
     # 阶段4：新任务开始前重置计划
     tools.reset_plan()
+    global _last_plan_step
+    _last_plan_step = None
     # 失败指纹累计器：(指纹 -> 连续次数, 上一次指纹)
     fail_streak = {"fingerprint": "", "count": 0}
 
@@ -447,6 +479,32 @@ def agent_loop(user_request: str) -> str:
         pass
 
     return final_answer
+
+
+def _emit_stage_change_if_advanced() -> None:
+    """阶段横幅触发器：update_plan 执行后调用。
+    比较 tools._PLAN_CURRENT 与模块级缓存 _last_plan_step，前进则发射 stage_change。
+    计划源数据在 tools 模块全局（update_plan 返回的 result 字段是文本摘要，不可直接解析）。"""
+    global _last_plan_step
+    steps = tools._PLAN_STEPS
+    current = tools._PLAN_CURRENT
+    if not steps or current <= 0 or current > len(steps):
+        return
+    if current == _last_plan_step:
+        return
+    last = _last_plan_step or 0     # None -> 0
+    if current <= last:
+        # 后退（模型回退重做某步）：更新基准不补打
+        _last_plan_step = current
+        return
+    # 前进：补打 last+1 .. current 全部横幅（统一处理首次建计划与中途跳步）
+    for s in range(last + 1, current + 1):
+        emitter.emit("stage_change", {
+            "current_step": s,
+            "total_steps": len(steps),
+            "desc": steps[s - 1].get("desc", ""),
+        })
+    _last_plan_step = current
 
 
 def _run_inner_loop(messages: list, fail_streak: dict) -> tuple:
@@ -482,7 +540,6 @@ def _run_inner_loop(messages: list, fail_streak: dict) -> tuple:
                 "content": assistant.content or "（模型返回空内容）",
             })
             final_answer = assistant.content or ""
-            print(f"\n[agent] 模型已给出最终回答，循环结束（第 {turn+1} 轮）")
             return final_answer, tool_call_count
 
         # 3. 模型请求调用工具
@@ -526,6 +583,11 @@ def _run_inner_loop(messages: list, fail_streak: dict) -> tuple:
                 "content": tool_result,
             })
 
+            # 阶段横幅：update_plan 后若 current_step 变化，发射 stage_change
+            # 计划源数据在 tools 模块全局，直接读取（update_plan 返回的 result 字段是文本摘要）
+            if tool_call.function.name == "update_plan":
+                _emit_stage_change_if_advanced()
+
             # 阶段4方向2：失败指纹累计+同错3次强制换方案
             try:
                 fn_args = json.loads(tool_call.function.arguments or "{}")
@@ -546,8 +608,6 @@ def _run_inner_loop(messages: list, fail_streak: dict) -> tuple:
             else:
                 fail_streak["count"] = 0
                 fail_streak["fingerprint"] = ""
-
-        print(f"  [轮次 {turn+1} 完成，共已调用 {tool_call_count} 次工具]")
 
     print(f"[agent] 达到最大轮次 {MAX_TOTAL_TURNS}，强制终止")
     return "（达到最大轮次，agent 未给出最终回答）", tool_call_count
@@ -694,6 +754,8 @@ def repl_loop() -> None:
                 {"role": "system", "content": _build_system_prompt_with_memory()},
             ]
             tools.reset_plan()
+            global _last_plan_step
+            _last_plan_step = None
             fail_streak = {"fingerprint": "", "count": 0}
             tool_call_count = 0
             last_user_request = ""
@@ -752,9 +814,7 @@ def main():
         return
     user_request = sys.argv[1]
     print(f"[agent] 收到需求: {user_request}\n")
-    result = agent_loop(user_request)
-    print("\n\n========== 最终输出 ==========")
-    print(result)
+    agent_loop(user_request)    # 内部已保存记忆+对话；最终答案由 call_llm 流式实时打印
 
 
 if __name__ == "__main__":
