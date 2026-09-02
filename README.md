@@ -8,15 +8,51 @@
 
 ## 整体架构
 
-```text
-用户需求 → agent.py（主循环：历史压缩/终止判断/失败指纹/流式输出）
-              ↕ 
-           tools.py（13 个工具：路径锁定 + 命令沙盒）
-              ↕
-           workspace/（受控工作区，独立 git 仓库）
+```mermaid
+flowchart TD
+    User([用户需求]) --> Agent
+
+    subgraph 入口层
+        Agent[agent.py<br/>main 分流]
+    end
+
+    Agent -->|带参| Loop
+    Agent -->|无参| Repl
+
+    subgraph 核心循环
+        Loop[loop.py<br/>失败指纹 / 历史压缩 / 阶段横幅]
+    end
+
+    subgraph 业务模块
+        Llm[llm.py<br/>流式+重试+503退避]
+        Exec[executor.py<br/>工具执行+预览精简]
+        Repl[repl.py<br/>/new /memory /undo /exit]
+        Mem[memory.py<br/>记忆注入/保存]
+    end
+
+    Loop --> Llm
+    Loop --> Exec
+    Loop --> Mem
+    Loop -.->|emit 事件| Log
+
+    subgraph 基础设施
+        Cfg[config.py<br/>配置+client]
+        Sch[schemas.py<br/>工具 schema]
+        Log[logger.py<br/>观察者+适配器]
+    end
+
+    Exec --> Tools
+    Sch --> Tools
+
+    subgraph 工具与工作区
+        Tools[tools.py<br/>13 个工具:路径锁定+命令沙盒]
+        WS[(workspace/<br/>受控工作区)]
+    end
+
+    Tools --> WS
 ```
 
-三件套分工：`agent.py` 主循环与 LLM 调用；`tools.py` 全部工具实现；`system_prompt.txt` 模型行为约束。
+按职责拆分的多模块结构：`agent.py` 入口分流；`loop.py` 核心循环与阶段横幅；`llm.py` 流式调用与重试；`executor.py` 工具执行与预览精简；`memory.py` 记忆注入与保存；`repl.py` 交互式 REPL；`config.py` 配置与 client；`schemas.py` 工具 schema；`logger.py` 观察者+适配器日志。`tools.py` 全部工具实现；`system_prompt.txt` 模型行为约束。
 
 ## 工具与功能
 
@@ -53,4 +89,5 @@ REPL 内置命令：`/new` 新任务、`/memory` 查看长期记忆、`/undo` �
 3. **结构化测试反馈**：run\_tests 把 pytest 输出解析为失败用例清单 + 根因片段，模型拿到的不是裸文本而是可定位的失败信息。
 4. **防幻觉设计**：测试未收集到时明确提示 5 项排查项（而非让模型误判"全部通过"）；工具返回携带 context\_hint 引导下一步。
 5. **交互式 REPL 对话**：`python agent.py` 无参即进入多轮对话模式，回答流式实时打字；`/new` 开启新任务（保留长期记忆）、`/memory` 查看任务历史与计划、`/undo` 撤销最近一轮、`/exit` 退出并写入记忆；对话跨会话持久化，从"一次性脚本"升级为"可对话的编程伙伴"。
+6. **观察者 + 适配器模式日志**：`logger.py` 用观察者模式解耦日志输出与业务逻辑——`AgentEventEmitter` 作 Subject 暴露统一 `emit(event, data)`，`StageBannerObserver`（阶段横幅）与 `CompactToolObserver`（工具调用单行预览）作 Observer 各自决定如何渲染；agent 流程事件（tool\_call / tool\_result / stage\_change）经适配器转为统一 emit 调用，调用方只管发事件不关心打印方式。日志可扩展：新增输出端只需加一个 Observer，业务代码零改动。
 

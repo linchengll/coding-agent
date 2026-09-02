@@ -4,14 +4,6 @@
 Subject：AgentEventEmitter —— agent 主循环持有一个全局实例 emitter。
 Observer：LogObserver 抽象基类，具体观察者按事件类型决定如何打印。
 
-设计要点：
-  - agent.py 不再直接 print 工具调用/轮次结束/阶段切换等噪音日志，
-    改为 emitter.emit(event_type, payload)，由观察者决定是否打印、如何打印。
-  - 流式输出 / REPL 命令输出 / 兜底终止警告 仍由 agent.py 直接 print，
-    不经此层，以保持核心体验和用户交互不被重构影响。
-  - 输出含 ▸ ✓ ✗ ◆ 等 Unicode 符号；用 _safe_print 兼容 GBK 终端：
-    优先走标准 print（UTF-8 终端直接正确渲染），编码失败时降级写 UTF-8 字节，
-    既不抛异常打断主循环，也不影响 agent.py 既有的中文 print。
 """
 from abc import ABC, abstractmethod
 from datetime import datetime
